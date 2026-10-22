@@ -22,3 +22,8 @@ Rules in `src/Core/WarGame.cs` (tested).
 ## Scope for version 1
 Two players, the full table, tutorial, Send, ads and the shop. War has no choices to make, so
 there are no computer levels. Later: tutorial clips, three or four players.
+
+## Changes from Darren's notes (2026-10-22)
+- Two to four players; a tie for the highest card is a war between those players only.
+- Three cards face down in a war (one, as an option); after a war the face-down cards are turned over for everyone to see.
+- Right hands only (nobody holds a fan); a Pause button while battles flip automatically; the log keeps three games.
