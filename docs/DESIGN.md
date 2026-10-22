@@ -1,19 +1,24 @@
-# Game Template: design
+# War: design
+
+The second Renegade card game, on the card kit ([renegade-cards](https://github.com/darren-rawlings/renegade-cards)).
 
 ## The game
-What it is, in two sentences. Rules summary, and anything that differs from the classic version.
+War for two, you against Rosie (the Bicycle rules). The deck is dealt out face down, 26 each.
+Each battle, both turn up their top card; the higher rank (aces high) takes both to the bottom
+of their pile. Equal ranks mean war: each puts one card face down and turns up another, and the
+higher takes everything (a war can lead to another). A player who can't turn a card up loses.
+Rules in `src/Core/WarGame.cs` (tested).
 
 ## Feel
-What makes it satisfying to touch: the physical pieces, the sounds, the one signature effect
-(Counter Fire's was the winning line catching fire).
+- The deck is shuffled in front of you (riffles and a bridge) and dealt out briskly.
+- Glass hands flick each card onto the felt with a pinch; the winner's hand sweeps the battle
+  under its pile. "War!" shows over Rosie's side.
+- Signature effect: the winner's pile catches fire.
 
-## Modes
-- Player vs player on one phone
-- Player vs computer: Easy, Medium, Hard
-
-## Ads
-- Between-games interstitial every 5th finished game
-- Rewarded ad for an optional extra (Counter Fire: Undo)
+## Settings
+- **Game length:** every card (classic) or 26 battles (most cards wins).
+- **Flip automatically:** plays the battles for you.
 
 ## Scope for version 1
-What ships first; everything else goes in a "later" list.
+Two players, the full table, tutorial, Send, ads and the shop. War has no choices to make, so
+there are no computer levels. Later: tutorial clips, three or four players.

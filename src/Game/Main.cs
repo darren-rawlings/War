@@ -1,277 +1,197 @@
-using GameTemplate.Core;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
 using Godot;
-using Renegade.Ads;
-using Renegade.Audio;
-using Renegade.Core;
-using Renegade.Dev;
-using Renegade.Looks;
-using Renegade.Play;
+using Renegade.Cards;
 using Renegade.Ui;
+using War.Core;
 
-namespace GameTemplate.Game;
+namespace War.Game;
 
 /// <summary>
-/// Starting point for a new game, built the way every Renegade game is: the shared stage (lights,
-/// reflection sky, table), a board on a rig that spins with a drag, the shared HUD (modes,
-/// difficulty, Style menu, Undo (ad), Start over, Settings with sound and freeze, a video
-/// tutorial behind Demo), material sounds, ads every 5th game, the winner's fire and the flight
-/// recorder. The placeholder game: tap the board to knock it, five knocks finish a game.
-/// Replace the board, the rules (src/Core), the tap, the tutorial pages and the clips with the
-/// real game. Tutorial clips: give each a case in PlayClip, then run
-/// addons/renegade_core/tools/Record-Clips.ps1 with their names.
+/// War against the computer: the deck is shuffled and dealt out face down, and each battle both
+/// glass hands flick their top card face up onto the felt; the higher card's hand sweeps them all
+/// under its pile. Equal cards mean war, with a card face down and another face up. Tap your pile
+/// to fight the next battle (or let Settings › Flip automatically do it).
 /// </summary>
-public partial class Main : Node3D
+public partial class Main : CardGame
 {
-	public const string Title = "Game Template";
+	private readonly Dictionary<Card, Card3D> _nodes = new();
+	private WarGame? _game;
 
-	/// <summary>Google's test ad units until the real ones exist in AdMob (see the release playbook).</summary>
-	private static readonly AdMobConfig AdUnits = AdMobConfig.Test;
+	protected override string Title => "War";
+	protected override string Hint => "Tap your pile to turn a card";
+	protected override bool HasLevels => false;
+	protected override IReadOnlyList<TutorialPage> TutorialPages => Tutorial.Pages;
+	protected override bool InProgress => _game is { IsOver: false, Battles: > 0 };
 
-	private const float Thickness = 0.4f;
+	private int BattleLimit => Settings.Extra.TryGetValue("length", out var length) && length == "quick" ? 26 : 0;
 
-	private readonly ImpactBank<Style> _impacts = new(Styles.Impact);
-	private readonly Scoreboard _wins = new();
-
-	private GameSettings _settings = null!;
-	private Counter _game = new(5);
-	private Node3D _rig = null!;
-	private Camera3D _camera = null!;
-	private MeshInstance3D _board = null!;
-	private SoundPool _sound = null!;
-	private GameHud _hud = null!;
-	private IAdService _ads = null!;
-	private AdSchedule? _adSchedule;
-	private SpinControl _spin = null!;
-	private Flames? _fire;
-
-	private bool _demo;
-	private bool _quitAfterDemo;
-	private string? _clip;
-	private float _demoTimer;
-
-	public override void _Ready()
+	protected override void AddSettings()
 	{
-		DevLog.Tag = "gt";
-		AudioWatch.Attach(this, Title);
-		_settings = GameSettings.Load();
-		ReadDeveloperArgs();
-		AudioServer.SetBusMute(0, _settings.Muted);
+		Hud.AddChoice("Game length", new[] { "Every card", "26 battles" }, BattleLimit > 0 ? 1 : 0, choice =>
+		{
+			Settings.Extra["length"] = choice == 1 ? "quick" : "classic";
+			Settings.Save();
+			if (!InProgress)
+				Run(StartRound());
+		});
+		Hud.AddToggle("Flip automatically", Flag("autoflip"), on =>
+		{
+			SetFlag("autoflip", on);
+			if (on && !Busy && _game is { IsOver: false })
+				Run(Fight());
+		});
+	}
 
-		_camera = new Camera3D { Position = new Vector3(0, 10f, 6.5f), Fov = 52, KeepAspect = Camera3D.KeepAspectEnum.Width };
-		AddChild(_camera);
-		_camera.LookAt(new Vector3(0, -0.4f, 0.3f));
-		Stage.Build(this, -Thickness, new Color("1a0f09"));
-		_rig = new Node3D();
-		AddChild(_rig);
-		_board = new MeshInstance3D
-		{
-			Mesh = new BoxMesh { Size = new Vector3(7, Thickness, 7) },
-			Position = new Vector3(0, -Thickness / 2, 0),
-			MaterialOverride = Materials.For(Styles.BoardLook(_settings.Board)),
-		};
-		_rig.AddChild(_board);
-		Stage.WarmUp(this, -Thickness, Sparkle.Halo);
+	protected override async Task NewRound()
+	{
+		int round = Round;
+		_nodes.Clear();
+		_game = null;
+		SetScore();
+		var order = Deck.Shuffled(Random);
+		var nodes = await ShuffleOnTable(order);
+		if (round != Round)
+			return;
+		for (int i = 0; i < order.Count; i++)
+			_nodes[order[i]] = nodes[i];
+		_game = new WarGame(order, BattleLimit);
 
-		_sound = new SoundPool();
-		AddChild(_sound);
-		_adSchedule ??= new AdSchedule(_settings.GamesSinceAd);
-		var theme = HudTheme.Warm;
-		_ads = AdServices.Create(this, AdUnits, _demo, new PlaceholderAds { TextColor = theme.Text });
+		// Deal the whole deck, one card at a time, alternately.
+		await DealRound(nodes, Enumerable.Range(0, 52).Select(i => i % 2).ToList(), spacing: 0.07f);
+		if (round != Round)
+			return;
+		await Restack(0);
+		await Restack(1);
+		Hud.SetRestartVisible(true);
+		await Ready();
+	}
 
-		_hud = new GameHud(theme);
-		AddChild(_hud);
-		// The HUD saves Sound and Freeze the board itself; add a game's own Settings rows with
-		// _hud.AddToggle and _hud.AddChoice (keep their values in _settings.Extra).
-		_hud.Build(new HudOptions(Title, "Tap the board  ·  Drag sideways to spin"), _settings);
-		_hud.NewGamePressed += OnNewGamePressed;
-		_hud.RestartPressed += OnRestartPressed;
-		_hud.SetTutorial(Tutorial.Pages);
-		_hud.ModeChosen += (mode, difficulty) =>
-		{
-			_settings.Mode = mode;
-			_settings.Difficulty = difficulty;
-			_settings.Save();
-		};
-		_hud.BoardChosen += style =>
-		{
-			_settings.Board = style;
-			_settings.Save();
-			_board.MaterialOverride = Materials.For(Styles.BoardLook(style));
-		};
-		_hud.PiecesChosen += style =>
-		{
-			_settings.Pieces = style;
-			_settings.Save();
-		};
+	/// <summary>Lays a player's pile out neatly, top card on top.</summary>
+	private async Task Restack(int p)
+	{
+		var pile = _game!.Pile(p);
+		Tween? last = null;
+		for (int i = 0; i < pile.Count; i++)
+			last = CardMotion.Slide(_nodes[pile[i]], Dealer.InStack(Table.Pile[p], pile.Count - 1 - i), 0.18f);
+		await Await(last);
+	}
 
-		_spin = new SpinControl(_rig, () => !_settings.FreezeBoard);
-		// Freeze the board also turns it back to where it started.
-		_spin.Frozen = () => _settings.FreezeBoard;
-		_spin.Tapped += OnTapped;
-		RefreshUi();
-		if (_clip != null)
+	/// <summary>Waits for your tap, or carries straight on.</summary>
+	private async Task Ready()
+	{
+		SetScore();
+		if (_game!.IsOver)
+			return;
+		if (Demo || Flag("autoflip"))
 		{
-			_hud.Visible = false;
-			_ = PlayClip(_clip);
+			await Pause(0.5f);
+			await Fight();
 			return;
 		}
-		if (!_demo)
-			_hud.OfferTutorialOnce(_settings);
-		_hud.ApplyDevFlags();
+		Busy = false;
+		Hud.SetStatus("Tap your pile to turn a card.", Bright);
 	}
 
-	public override void _UnhandledInput(InputEvent @event)
+	private async Task Fight()
 	{
-		if (!_hud.MenuOpen)
-			_spin.HandleInput(@event);
-	}
-
-	/// <summary>A tap on the board: a knock in the board's material, sparks on the last one.</summary>
-	private void OnTapped(Vector2 screen)
-	{
-		if (_game.IsDone)
-			return;
-		var from = _camera.ProjectRayOrigin(screen);
-		var direction = _camera.ProjectRayNormal(screen);
-		if (direction.Y > -0.01f)
-			return;
-		var hit = from + direction * (-from.Y / direction.Y);
-		var local = _rig.ToLocal(hit);
-		if (Mathf.Abs(local.X) > 3.5f || Mathf.Abs(local.Z) > 3.5f)
-			return;
-		_hud.HideHint();
-		_game.Tap();
-		_sound.PlayImpact(_impacts.Random(_settings.Board), hit, 1f, Styles.GainDb(_settings.Board));
-		if (_game.IsDone)
+		var game = _game!;
+		int round = Round;
+		Busy = true;
+		var events = game.Battle();
+		var placed = new int[2];
+		var pending = new List<Task>();
+		foreach (var e in events)
 		{
-			_wins.Win(first: true);
-			Sparkle.Burst(_rig, local + new Vector3(0, 0.3f, 0));
-			// The winner's fire: in a real game, set the winning pieces alight.
-			_fire = Flames.SetAlight(_rig, local, new[] { _board }, radius: 0.6f, size: 1.4f, withLight: true);
-		}
-		RefreshUi();
-	}
-
-	private void OnNewGamePressed()
-	{
-		bool adDue = _adSchedule!.GameFinished();
-		_settings.GamesSinceAd = _adSchedule.GamesSinceAd;
-		_settings.Save();
-		if (adDue)
-		{
-			DevLog.Write("ad: between-games interstitial");
-			_ads.ShowInterstitial(StartGame);
-		}
-		else
-		{
-			StartGame();
-		}
-	}
-
-	private void StartGame()
-	{
-		_fire?.Extinguish();
-		_fire = null;
-		_board.MaterialOverlay = null;
-		_game = new Counter(5);
-		RefreshUi();
-	}
-
-	/// <summary>
-	/// Start over mid-game. Against the computer it counts as resigning (a loss) unless the player
-	/// watches an ad; between two players it just asks first.
-	/// </summary>
-	private void OnRestartPressed()
-	{
-		if (_game.IsDone || _game.Count == 0)
-		{
-			StartGame();
-			return;
-		}
-		_hud.AskRestart(_settings.Mode == GameMode.PlayerVsComputer && !_demo, countLoss =>
-		{
-			if (countLoss)
-				_wins.Win(first: false);
-			StartGame();
-		}, then => _ads.ShowRewarded(rewarded: then, closed: () => { }));
-	}
-
-	/// <summary>
-	/// Plays one scripted scene for the tutorial (with --clip=name), then quits; the HUD is hidden
-	/// so the clip shows only the board. Record them with addons/renegade_core/tools/Record-Clips.ps1.
-	/// </summary>
-	private async System.Threading.Tasks.Task PlayClip(string clip)
-	{
-		_settings.Muted = false;
-		await ToSignal(GetTree().CreateTimer(0.8), SceneTreeTimer.SignalName.Timeout);
-		switch (clip)
-		{
-			default:
-				for (int i = 0; i < 5; i++)
-				{
-					OnTapped(GetViewport().GetVisibleRect().Size / 2);
-					await ToSignal(GetTree().CreateTimer(0.6), SceneTreeTimer.SignalName.Timeout);
-				}
-				break;
-		}
-		await ToSignal(GetTree().CreateTimer(2.0), SceneTreeTimer.SignalName.Timeout);
-		GetTree().Quit();
-	}
-
-	private void RefreshUi()
-	{
-		_hud.SetScore($"Games {_wins.First}");
-		_hud.SetNewGameVisible(_game.IsDone);
-		_hud.SetRestartVisible(!_game.IsDone);
-		_hud.SetStatus(_game.IsDone ? "Done!" : $"Knock {_game.Count} of {_game.Target}", new Color("fff3e0"));
-		if (_game.IsDone && _demo && _quitAfterDemo && _wins.First >= 5)
-			GetTree().Quit();
-	}
-
-	public override void _Process(double delta)
-	{
-		float dt = (float)delta;
-		_spin.Process(dt);
-		if (!_demo)
-			return;
-		_demoTimer += dt;
-		if (_demoTimer < 0.3f)
-			return;
-		_demoTimer = 0f;
-		if (_game.IsDone)
-			OnNewGamePressed();
-		else
-			OnTapped(GetViewport().GetVisibleRect().Size / 2);
-	}
-
-	/// <summary>
-	/// Developer flags after `--` (or in user://dev_args.txt on a phone): `--log`, `--demo`,
-	/// `--quit-after-demo`, `--games-since-ad=4`, `--clip=knock` (plays a tutorial clip and quits),
-	/// plus the HUD's `--tutorial=N` and `--settings`. Add the game's own flags here.
-	/// </summary>
-	private void ReadDeveloperArgs()
-	{
-		foreach (var (name, value) in DevArgs.Read())
-		{
-			switch (name)
+			if (round != Round)
+				return;
+			switch (e)
 			{
-				case "--log":
-					DevLog.Enabled = true;
+				case Turned turned:
+					// Both turn together: start each throw, and wait once both are on their way.
+					pending.Add(Put(turned.Player, turned.Card, placed[turned.Player]++, faceUp: true));
+					if (pending.Count == 2)
+					{
+						await Task.WhenAll(pending);
+						pending.Clear();
+						await Pause(0.45f);
+					}
 					break;
-				case "--demo":
-					_demo = true;
-					_settings.Muted = false;
+				case WarDeclared war:
+					Say(1, war.Depth == 1 ? "War!" : "War again!");
+					Hud.SetStatus(war.Depth == 1 ? "Equal cards: war!" : "Equal again: another war!", Bright);
+					await Pause(0.7f);
 					break;
-				case "--quit-after-demo":
-					_quitAfterDemo = true;
+				case FaceDown down:
+					pending.Add(Put(down.Player, down.Card, placed[down.Player]++, faceUp: false));
+					if (pending.Count == 2)
+					{
+						await Task.WhenAll(pending);
+						pending.Clear();
+					}
 					break;
-				case "--games-since-ad":
-					_adSchedule = new AdSchedule(int.Parse(value));
+				case Won won:
+					await Task.WhenAll(pending);
+					pending.Clear();
+					SayNone();
+					await Sweep(won.Player, won.Cards);
 					break;
-				case "--clip":
-					_clip = value;
-					break;
+				case GameOver over:
+					await Task.WhenAll(pending);
+					SetScore();
+					int w = over.Winner;
+					string message = w == 0 ? $"You win the war, {over.Cards[0]} cards to {over.Cards[1]}!"
+						: w == 1 ? $"Rosie wins the war, {over.Cards[1]} cards to {over.Cards[0]}."
+						: "A tie: 26 cards each!";
+					Finish(message, w, w >= 0 ? game.Pile(w).Take(8).Select(c => _nodes[c]) : null, Table.Pile[w >= 0 ? w : 0]);
+					return;
 			}
+		}
+		await Ready();
+	}
+
+	/// <summary>A player's hand flicks their top card onto the battle, face up or down.</summary>
+	private async Task Put(int p, Card card, int k, bool faceUp)
+	{
+		var node = _nodes[card];
+		float z = p == 0 ? 0.25f : -0.95f;
+		var at = new Vector3(-0.35f + k * 0.2f, CardTable.FeltY + 0.004f * (k + 1), z);
+		float yaw = ((float)Random.NextDouble() - 0.5f) * 0.25f;
+		var target = faceUp ? FaceUpAt(at, yaw) : FaceDownAt(at, yaw);
+		await Hands[p].Throw(new[] { node }, new[] { target });
+		if (faceUp)
+			Hud.SetStatus(p == 0 ? $"You turn the {Card.RankName(card.Rank).ToLowerInvariant()}." : $"Rosie turns the {Card.RankName(card.Rank).ToLowerInvariant()}.", Muted);
+	}
+
+	/// <summary>The winner's hand gathers the battle's cards and slides them under their pile.</summary>
+	private async Task Sweep(int p, IReadOnlyList<Card> cards)
+	{
+		var top = cards.Select(c => _nodes[c]).OrderByDescending(n => n.GlobalPosition.Y).ToList();
+		string what = cards.Count == 2 ? "both cards" : $"all {cards.Count} cards";
+		Hud.SetStatus(p == 0 ? $"You take {what}." : $"Rosie takes {what}.", Bright);
+		// Gather them beside the pile, face down, then the pile settles with them at the bottom.
+		var beside = Table.Pile[p] + new Vector3(p == 0 ? 0.75f : -0.75f, 0, 0);
+		var targets = top.Select((_, i) => Dealer.InStack(beside, i)).ToList();
+		await Hands[p].Carry(top, targets, seconds: 0.35f, lift: 0.2f);
+		await Restack(p);
+		SetScore();
+	}
+
+	private void SetScore()
+	{
+		var game = _game;
+		Hud.SetScore(game == null ? $"Wins {Wins.First}–{Wins.Second}" : $"Cards: you {game.Count(0)} · {game.Count(1)} Rosie   ·   Wins {Wins.First}–{Wins.Second}");
+	}
+
+	protected override void Tapped(Vector3 origin, Vector3 direction, Vector2 screen)
+	{
+		if (_game is not { IsOver: false })
+			return;
+		if (HitCard(_game.Pile(0).Select(c => _nodes[c]), origin, direction) != null)
+		{
+			Hud.HideHint();
+			Run(Fight());
 		}
 	}
 }
