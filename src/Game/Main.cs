@@ -193,12 +193,17 @@ public partial class Main : CardGame
 					pending.Clear();
 					SayNone();
 					News($"{string.Join(" · ", turned.Select(x => $"{NameOf(x.Player)} {x.Card}"))} → {NameOf(won.Player)}");
+					// The winning card has its moment: it rises, swells and sparkles.
+					if (turned.LastOrDefault(x => x.Player == won.Player) is { Card: var best } && _nodes.TryGetValue(best, out var bestNode))
+						await Glory(bestNode, won.Player);
 					if (won.Hidden.Count > 0)
 						await Reveal(won);
 					await Sweep(won.Player, won.Cards);
 					break;
 				case Out @out:
 					News($"{NameOf(@out.Player)} {(@out.Player == 0 ? "are" : "is")} out of cards.");
+					// Out of the game: their hands leave the table.
+					Hands[@out.Player].Leave();
 					break;
 				case GameOver over:
 					await Task.WhenAll(pending);
@@ -233,11 +238,10 @@ public partial class Main : CardGame
 	/// <summary>Where a player's battle cards go: towards the middle from their pile, side by side.</summary>
 	private Vector3 BattleSpot(int p, int k)
 	{
-		var toward = Table.Centre - Table.Pile[p];
-		toward.Y = 0;
-		var dir = toward.Normalized();
-		var right = dir.Cross(Vector3.Up).Normalized();
-		float reach = Players == 2 ? 0.8f : 0.55f;
+		var dir = Table.Toward[p];
+		var right = dir.Cross(Vector3.Up);
+		// Well clear of the pile (a card's length and more), so nothing lands under it.
+		float reach = Mathf.Abs(dir.X) > 0.9f ? 0.85f : 1.0f;
 		return Table.Pile[p] + dir * reach + right * (-0.3f + k * 0.16f) + Vector3.Up * (CardTable.FeltY + 0.004f * (k + 1));
 	}
 
@@ -245,13 +249,33 @@ public partial class Main : CardGame
 	private async Task Put(int p, Card card, int k, bool faceUp)
 	{
 		var node = _nodes[card];
-		var toward = Table.Pile[p] - Table.Centre;
+		var toward = -Table.Toward[p];
 		float yaw = (p == 0 ? 0 : Mathf.Atan2(toward.X, toward.Z)) + ((float)Random.NextDouble() - 0.5f) * 0.25f;
 		var at = BattleSpot(p, k);
 		var target = faceUp ? FaceUpAt(at, yaw) : FaceDownAt(at, yaw);
 		await Hands[p].Throw(new[] { node }, new[] { target });
 		if (faceUp)
 			Hud.SetStatus(p == 0 ? $"You turn the {Card.RankName(card.Rank).ToLowerInvariant()}." : $"{Names[p]} turns the {Card.RankName(card.Rank).ToLowerInvariant()}.", Muted);
+	}
+
+	/// <summary>The winning card's moment: it lifts and swells, sparkling, for a second, then settles back.</summary>
+	private async Task Glory(Card3D card, int p)
+	{
+		var home = card.GlobalPosition;
+		var up = home + Vector3.Up * 0.3f;
+		string rank = Card.RankName(card.Card.Rank).ToLowerInvariant();
+		Hud.SetStatus(p == 0 ? $"Your {rank} wins!" : $"{Names[p]}'s {rank} wins!", Bright);
+		var rise = card.CreateTween().SetParallel();
+		rise.TweenProperty(card, "global_position", up, 0.25f).SetTrans(Tween.TransitionType.Back).SetEase(Tween.EaseType.Out);
+		rise.TweenProperty(card, "scale", Vector3.One * 1.3f, 0.25f).SetTrans(Tween.TransitionType.Back).SetEase(Tween.EaseType.Out);
+		await Await(rise);
+		Renegade.Play.Sparkle.Burst(this, up + Vector3.Up * 0.05f);
+		Sounds.PlaySlap(up);
+		await Pause(0.8f);
+		var settle = card.CreateTween().SetParallel();
+		settle.TweenProperty(card, "global_position", home, 0.2f);
+		settle.TweenProperty(card, "scale", Vector3.One, 0.2f);
+		await Await(settle);
 	}
 
 	/// <summary>After a war: the face-down cards turn over for a moment, so the loser sees what was lost.</summary>
@@ -279,9 +303,7 @@ public partial class Main : CardGame
 		string what = cards.Count == 2 ? "both cards" : $"all {cards.Count} cards";
 		Hud.SetStatus(p == 0 ? $"You take {what}." : $"{Names[p]} takes {what}.", Bright);
 		// Gather them beside the pile, face down, then the pile settles with them at the bottom.
-		var toward = Table.Centre - Table.Pile[p];
-		toward.Y = 0;
-		var beside = Table.Pile[p] + toward.Normalized().Cross(Vector3.Up).Normalized() * 0.75f;
+		var beside = Table.Pile[p] + Table.Toward[p].Cross(Vector3.Up) * 0.75f;
 		var targets = top.Select((_, i) => Dealer.InStack(beside, i)).ToList();
 		await Hands[p].Carry(top, targets, seconds: 0.35f, lift: 0.2f);
 		await Restack(p);
