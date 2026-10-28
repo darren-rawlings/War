@@ -142,6 +142,10 @@ public partial class Main : CardGame
 		int round = Round;
 		Busy = true;
 		var events = game.Battle();
+		// Tutorial clips start as a battle (or one that ends in a war) begins.
+		ClipMoment("battle", 5);
+		if (events.Any(e => e is WarDeclared))
+			ClipMoment("war", 8);
 		var placed = new int[Players];
 		var pending = new List<Task>();
 		var turned = new List<(int Player, Card Card)>();
